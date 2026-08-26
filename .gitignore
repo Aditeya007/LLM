@@ -1,0 +1,27 @@
+# Virtual environments
+ven/
+venv/
+
+# Python cache and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Generated training data
+train.bin
+val.bin
+
+# Model checkpoints and experiment outputs
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+
+# Local environment files
+.env
+.env.*
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
