@@ -13,7 +13,7 @@ micro_batch_size = 4
 gradient_accumulation_steps = 4
 block_size = 512
 
-max_iters = 1000
+max_iters = 40000
 eval_interval = 100
 eval_iters = 10
 ckpt_interval = 500

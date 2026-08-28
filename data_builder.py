@@ -1,46 +1,72 @@
-"""
-Streams a HuggingFace text dataset and writes out ~TARGET_GB of raw text
-to a single .txt file. Doesn't download the full dataset — stops as soon
-as it hits the target size.
-
-pip install datasets
-"""
-
+import os
 from datasets import load_dataset
 
-# ---- config ----
-DATASET_NAME = "HuggingFaceFW/fineweb-edu"   # swap for "Skylion007/openwebtext" if you want raw web text instead
-DATASET_CONFIG = "sample-10BT"                # fineweb-edu ships pre-made smaller samples, this one's plenty big enough
-TARGET_GB = 4
 OUTPUT_FILE = "data.txt"
-# ----------------
-
+TARGET_GB = 10
 TARGET_BYTES = TARGET_GB * 1024 ** 3
 
-def main():
-    ds = load_dataset(DATASET_NAME, DATASET_CONFIG, split="train", streaming=True)
+def daily_dialog_text(ex):
+    return " ".join(ex["dialog"])
 
+def dialogsum_text(ex):
+    return ex["dialogue"]
+
+def fineweb_text(ex):
+    return ex["text"]
+
+SOURCES = [
+    {"name": "li2017dailydialog/daily_dialog", "config": None, "extract": daily_dialog_text},
+    {"name": "knkarthick/dialogsum", "config": None, "extract": dialogsum_text},
+    {"name": "HuggingFaceFW/fineweb-edu", "config": "sample-10BT", "extract": fineweb_text},
+]
+
+def run():
     bytes_written = 0
-    n_examples = 0
-
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        for example in ds:
-            text = example["text"]
-            f.write(text)
-            f.write("\n\n")  # separator between documents
-
-            bytes_written += len(text.encode("utf-8")) + 2
-            n_examples += 1
-
-            if n_examples % 2000 == 0:
-                gb_so_far = bytes_written / (1024 ** 3)
-                print(f"{n_examples} docs, {gb_so_far:.2f} GB written")
-
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as out:
+        for source in SOURCES:
             if bytes_written >= TARGET_BYTES:
                 break
 
-    final_gb = bytes_written / (1024 ** 3)
-    print(f"\nDone. Wrote {final_gb:.2f} GB across {n_examples} docs to {OUTPUT_FILE}")
+            print(f"Starting source: {source['name']}")
+
+            try:
+                if source["config"]:
+                    ds = load_dataset(source["name"], source["config"], split="train", streaming=True)
+                else:
+                    ds = load_dataset(source["name"], split="train", streaming=True, trust_remote_code=True)
+            except Exception as e:
+                print(f"Skipping {source['name']}, failed to load: {e}")
+                continue
+
+            source_bytes = 0
+            n = 0
+
+            for example in ds:
+                try:
+                    text = source["extract"](example)
+                except Exception:
+                    continue
+
+                if not text:
+                    continue
+
+                out.write(text)
+                out.write("\n\n")
+
+                added = len(text.encode("utf-8")) + 2
+                bytes_written += added
+                source_bytes += added
+                n += 1
+
+                if n % 5000 == 0:
+                    print(f"{source['name']} | {n} examples | {source_bytes/1e9:.3f} GB this source | {bytes_written/1e9:.3f} GB total")
+
+                if bytes_written >= TARGET_BYTES:
+                    break
+
+            print(f"Finished {source['name']}: {source_bytes/1e9:.3f} GB, {n} examples")
+
+    print(f"Done. Total written: {bytes_written/1e9:.3f} GB")
 
 if __name__ == "__main__":
-    main()
+    run()

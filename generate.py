@@ -41,8 +41,8 @@ while True:
             output = model.generate(
                 idx,
                 max_new_tokens=100,
-                temperature=0.8,
-                top_k=50
+                temperature=0.9,
+                top_k=40
             )
 
     generated_tokens = output[0].tolist()
