@@ -3,75 +3,184 @@ import tiktoken
 
 from model import GPT, GPTConfig
 
+
+# ============================================================
+# Setup
+# ============================================================
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
 checkpoint = torch.load(
-    "ckpt.pt",
+    "sft_ckpt.pt",
     map_location=device,
     weights_only=False
 )
 
 config = checkpoint["config"]
+
 model = GPT(config).to(device)
 model.load_state_dict(checkpoint["model"])
 model.eval()
 
 enc = tiktoken.get_encoding("gpt2")
 
+EOT_TOKEN = 50256
+
 print(f"Using device: {device}")
-print("Model loaded.")
+print(f"Model loaded: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M parameters")
 print()
 
-def generate_with_repeat_block(idx, max_new_tokens, temperature, top_k, no_repeat_ngram_size):
-    for _ in range(max_new_tokens):
-        idx_cond = idx if idx.size(1) <= model.config.block_size else idx[:, -model.config.block_size:]
 
-        with torch.autocast(device_type=device, dtype=dtype, enabled=(device == "cuda")):
+# ============================================================
+# Generation
+# ============================================================
+
+@torch.no_grad()
+def generate(
+    idx,
+    max_new_tokens=100,
+    temperature=0.8,
+    top_k=40,
+    no_repeat_ngram_size=3
+):
+
+    for _ in range(max_new_tokens):
+
+        # Keep only the model's context window
+        idx_cond = (
+            idx
+            if idx.size(1) <= model.config.block_size
+            else idx[:, -model.config.block_size:]
+        )
+
+        with torch.autocast(
+            device_type=device,
+            dtype=dtype,
+            enabled=(device == "cuda")
+        ):
             logits, _ = model(idx_cond)
 
-        logits = logits[:, -1, :] / temperature
+        # Last-token logits
+        logits = logits[:, -1, :]
 
+        # Temperature
+        logits = logits / temperature
+
+        # Never generate EOT until the model actually decides to stop
+        # (it is still allowed as the sampled stopping token)
         if top_k is not None:
-            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            v, _ = torch.topk(
+                logits,
+                min(top_k, logits.size(-1))
+            )
+
             logits[logits < v[:, [-1]]] = float("-inf")
 
+        # --------------------------------------------------------
+        # No-repeat n-gram blocking
+        # --------------------------------------------------------
+
         if idx.size(1) >= no_repeat_ngram_size:
+
             seq = idx[0].tolist()
             banned = set()
-            for i in range(len(seq) - no_repeat_ngram_size + 1):
-                ngram = tuple(seq[i:i + no_repeat_ngram_size - 1])
-                if ngram == tuple(seq[-(no_repeat_ngram_size - 1):]):
-                    banned.add(seq[i + no_repeat_ngram_size - 1])
+
+            prefix = tuple(
+                seq[-(no_repeat_ngram_size - 1):]
+            )
+
+            for i in range(
+                len(seq) - no_repeat_ngram_size + 1
+            ):
+
+                ngram_prefix = tuple(
+                    seq[i:i + no_repeat_ngram_size - 1]
+                )
+
+                if ngram_prefix == prefix:
+                    banned.add(
+                        seq[i + no_repeat_ngram_size - 1]
+                    )
+
             for token_id in banned:
                 logits[0, token_id] = float("-inf")
 
+        # --------------------------------------------------------
+        # Sample
+        # --------------------------------------------------------
+
         probs = torch.softmax(logits, dim=-1)
-        idx_next = torch.multinomial(probs, num_samples=1)
-        idx = torch.cat((idx, idx_next), dim=1)
+
+        idx_next = torch.multinomial(
+            probs,
+            num_samples=1
+        )
+
+        idx = torch.cat(
+            (idx, idx_next),
+            dim=1
+        )
+
+        # --------------------------------------------------------
+        # Stop at EOT
+        # --------------------------------------------------------
+
+        if idx_next.item() == EOT_TOKEN:
+            break
 
     return idx
 
+
+# ============================================================
+# Chat loop
+# ============================================================
+
 while True:
-    prompt = input("You: ")
+
+    prompt = input("You: ").strip()
 
     if prompt.lower() in ["exit", "quit"]:
         break
 
-    tokens = enc.encode_ordinary(prompt)
-    idx = torch.tensor([tokens], dtype=torch.long, device=device)
+    if not prompt:
+        continue
 
-    with torch.no_grad():
-        output = generate_with_repeat_block(
-            idx,
-            max_new_tokens=100,
-            temperature=0.9,
-            top_k=50,
-            no_repeat_ngram_size=3
-        )
+    # IMPORTANT:
+    # This matches the format used during SFT.
+    formatted_prompt = f"You: {prompt}\nHimeko:"
+
+    tokens = enc.encode_ordinary(formatted_prompt)
+
+    idx = torch.tensor(
+        [tokens],
+        dtype=torch.long,
+        device=device
+    )
+
+    output = generate(
+        idx,
+        max_new_tokens=100,
+        temperature=0.8,
+        top_k=40,
+        no_repeat_ngram_size=3
+    )
+
+    # --------------------------------------------------------
+    # Decode only the newly generated tokens
+    # --------------------------------------------------------
 
     generated_tokens = output[0].tolist()
-    generated_text = enc.decode(generated_tokens)
 
-    print(f"Model: {generated_text}")
+    new_tokens = generated_tokens[len(tokens):]
+
+    # Remove EOT if present
+    if EOT_TOKEN in new_tokens:
+        new_tokens = new_tokens[
+            :new_tokens.index(EOT_TOKEN)
+        ]
+
+    response = enc.decode(new_tokens).strip()
+
+    print(f"Himeko: {response}")
     print()
